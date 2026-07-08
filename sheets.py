@@ -2,6 +2,7 @@ import gspread
 import json
 import os
 import base64
+import re
 from google.oauth2.service_account import Credentials
 
 SCOPES = [
@@ -37,12 +38,26 @@ def get_sheet_id():
     """Get Google Sheet ID from env var or config file."""
     sheet_id = os.environ.get("GOOGLE_SHEET_ID")
     if sheet_id:
+        sheet_id = sheet_id.strip()
+        # If it's a full Google Sheets URL, extract the ID
+        if "docs.google.com" in sheet_id:
+            match = re.search(r"/d/([a-zA-Z0-9-_]+)", sheet_id)
+            if match:
+                return match.group(1)
         return sheet_id
+
     config_file = os.environ.get("CONFIG_FILE", "config.json")
     if os.path.exists(config_file):
         with open(config_file) as f:
             cfg = json.load(f)
-        return cfg.get("google_sheet_id")
+        val = cfg.get("google_sheet_id")
+        if val:
+            val = val.strip()
+            if "docs.google.com" in val:
+                match = re.search(r"/d/([a-zA-Z0-9-_]+)", val)
+                if match:
+                    return match.group(1)
+            return val
     return None
 
 
