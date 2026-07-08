@@ -1,6 +1,8 @@
 import logging
 import os
-from datetime import date, datetime, timedelta
+import asyncio
+from datetime import date, datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -19,7 +21,6 @@ from sheets import (
 )
 
 # ─── CONFIG ──────────────────────────────────────────────────
-# All config via environment variables (for Railway cloud deployment)
 BOT_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "8936564014:AAHJ4dKgXxXRjyfo4GdmPGr2lRw0jv6R0Hc")
 SHEET_TAB  = os.environ.get("SHEET_TAB", "Sheet1")
 
@@ -28,6 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
 )
 log = logging.getLogger(__name__)
+executor = ThreadPoolExecutor(max_workers=3)
 
 # ─── Helpers ─────────────────────────────────────────────────
 
@@ -62,6 +64,74 @@ def add_to_tracker_sheet(username, followers):
         log.error(f"Sheet update error: {e}")
         return False
 
+# ─── Daily Tracking Logic (Cloud-based Auto-Run) ─────────────
+
+def run_daily_tracking():
+    """Sync tracking logic: loads profiles, checks expiry, scrapes, updates sheet."""
+    log.info("Starting daily tracking update...")
+    try:
+        profiles = load_profiles_from_sheet()
+        if not profiles:
+            log.info("No profiles to track.")
+            return
+
+        date_col_str = date.today().strftime("%d/%m/%y")
+        ws           = get_sheet(tab_name=SHEET_TAB)
+        date_col     = get_or_create_date_column(ws, date_col_str)
+
+        for p in profiles:
+            username   = p.get("username", "")
+            added      = p.get("added_date", "")
+            track_days = int(p.get("track_days", 4))
+
+            rem = days_remaining(added, track_days)
+            if rem <= 0:
+                log.info(f"Profile @{username} has expired (4 days completed). Removing...")
+                remove_profile_from_sheet(username)
+                continue
+
+            log.info(f"Updating @{username}...")
+            data = scrape_socialblade(username)
+            followers = data["followers"] if data else None
+
+            profile_link = f"https://www.instagram.com/{username}/"
+            row_idx      = find_or_create_profile_row(ws, username, profile_link)
+            if followers:
+                update_follower_count(ws, row_idx, date_col, followers)
+                log.info(f"Successfully updated @{username} with {followers} followers.")
+        
+        log.info("Daily tracking update completed successfully.")
+    except Exception as e:
+        log.error(f"Error during daily tracking update: {e}")
+
+async def run_daily_tracking_async():
+    """Run the synchronous daily tracking in a thread pool to avoid blocking the bot."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, run_daily_tracking)
+
+async def daily_tracker_loop():
+    """Background loop that runs daily tracking at 9:00 AM IST."""
+    log.info("Background daily tracker loop started.")
+    last_run_date = None
+    while True:
+        try:
+            # Get current time in IST (UTC + 5:30)
+            now_utc = datetime.now(timezone.utc)
+            now_ist = now_utc + timedelta(hours=5, minutes=30)
+            today_str = now_ist.strftime("%Y-%m-%d")
+
+            # Check if it is 9:00 AM IST and we haven't run yet today
+            if now_ist.hour == 9 and last_run_date != today_str:
+                log.info(f"It is 9:00 AM IST. Running scheduled daily tracking for {today_str}...")
+                await run_daily_tracking_async()
+                last_run_date = today_str
+
+        except Exception as e:
+            log.error(f"Error in daily tracker loop: {e}")
+
+        # Check every 15 minutes
+        await asyncio.sleep(900)
+
 # ─── Bot Handlers ─────────────────────────────────────────────
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -71,6 +141,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "/list - See all tracked profiles\n"
         "/remove username - Stop tracking\n"
+        "/run - Manually run tracking update now\n"
         "/help - How to use\n\n"
         "Example - just paste:\n"
         "https://www.instagram.com/learningwave.in/"
@@ -144,6 +215,16 @@ async def remove_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Removed @{username} from tracking.")
     else:
         await update.message.reply_text(f"@{username} not found in tracking list.")
+
+
+async def run_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Command to manually trigger tracking update."""
+    await update.message.reply_text("🔄 Starting manual tracking update for all profiles...")
+    try:
+        await run_daily_tracking_async()
+        await update.message.reply_text("✅ Tracking update completed! Check your Google Sheet.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error during update: {e}")
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -229,14 +310,20 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Error removing: {e}")
 
 
+async def post_init(application: Application) -> None:
+    """Start the background daily loop task once the bot is initialized."""
+    asyncio.create_task(daily_tracker_loop())
+
+
 # ─── Main ────────────────────────────────────────────────────
 def main():
     print("Starting Insta Tracker Bot...")
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start",  start))
     app.add_handler(CommandHandler("help",   help_cmd))
     app.add_handler(CommandHandler("list",   list_profiles))
     app.add_handler(CommandHandler("remove", remove_cmd))
+    app.add_handler(CommandHandler("run",    run_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
     print("Bot is running! Send messages on Telegram.")
