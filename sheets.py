@@ -75,17 +75,25 @@ def get_sheet(credentials_file=None, sheet_id=None, tab_name="Sheet1"):
 
 
 def get_or_create_date_column(worksheet, date_str):
-    header_row = worksheet.row_values(1)
+    date_str = date_str.strip()
+    raw_headers = worksheet.row_values(1)
+    header_row = [str(val).strip() for val in raw_headers]
+
+    # Check if date already exists (ignoring spaces)
     if date_str in header_row:
-        return header_row.index(date_str) + 1
+        col_index = header_row.index(date_str) + 1
+        return col_index
 
-    for i, val in enumerate(header_row):
-        if val.strip() == "":
-            worksheet.update_cell(1, i + 1, date_str)
-            return i + 1
+    # Use first empty slot in header row if available (start checking from col 6 onwards)
+    for i in range(5, len(header_row)):
+        if header_row[i] == "":
+            col_index = i + 1
+            worksheet.update_cell(1, col_index, date_str)
+            return col_index
 
-    new_col_index  = len(header_row) + 1
-    current_cols   = worksheet.col_count
+    # No empty slot - add new column at the end
+    new_col_index = len(header_row) + 1
+    current_cols = worksheet.col_count
     if new_col_index > current_cols:
         worksheet.resize(rows=worksheet.row_count, cols=current_cols + 20)
     worksheet.update_cell(1, new_col_index, date_str)
