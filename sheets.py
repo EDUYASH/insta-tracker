@@ -1,3 +1,4 @@
+from datetime import date, datetime
 import gspread
 import json
 import os
@@ -9,6 +10,35 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+def parse_date_lenient(val):
+    """
+    Tries to parse a string into a date object.
+    Supports formats like 'd/m/y', 'dd/mm/yy', 'd/m/yyyy', 'dd-mm-yyyy', etc.
+    """
+    val = str(val).strip()
+    if not val:
+        return None
+    val = val.replace("-", "/").replace(".", "/")
+    
+    # Try standard formats
+    for fmt in ("%d/%m/%y", "%d/%m/%Y", "%m/%d/%y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(val, fmt).date()
+        except ValueError:
+            continue
+            
+    # Lenient numeric parsing
+    match = re.match(r"^(\d{1,2})/(\d{1,2})/(\d{2,4})$", val)
+    if match:
+        d, m, y = map(int, match.groups())
+        if y < 100:
+            y += 2000
+        try:
+            return date(y, m, d)
+        except ValueError:
+            pass
+    return None
 
 def get_google_creds():
     """
@@ -75,30 +105,34 @@ def get_sheet(credentials_file=None, sheet_id=None, tab_name="Sheet1"):
 
 
 def get_or_create_date_column(worksheet, date_str):
-    date_str = date_str.strip()
-    raw_headers = worksheet.row_values(1)
-    header_row = [str(val).strip() for val in raw_headers]
+    target_date = parse_date_lenient(date_str)
+    if not target_date:
+        target_date = date_str.strip()
 
-    # Check if date already exists (ignoring spaces)
-    if date_str in header_row:
-        col_index = header_row.index(date_str) + 1
-        return col_index
+    raw_headers = worksheet.row_values(1)
+    header_dates = []
+    for val in raw_headers:
+        parsed = parse_date_lenient(val)
+        header_dates.append(parsed if parsed else str(val).strip())
+
+    # Check if date already exists
+    if target_date in header_dates:
+        return header_dates.index(target_date) + 1
 
     # Use first empty slot in header row if available (start checking from col 6 onwards)
-    for i in range(5, len(header_row)):
-        if header_row[i] == "":
+    for i in range(5, len(raw_headers)):
+        if str(raw_headers[i]).strip() == "":
             col_index = i + 1
             worksheet.update_cell(1, col_index, date_str)
             return col_index
 
     # No empty slot - add new column at the end
-    new_col_index = len(header_row) + 1
+    new_col_index = len(raw_headers) + 1
     current_cols = worksheet.col_count
     if new_col_index > current_cols:
         worksheet.resize(rows=worksheet.row_count, cols=current_cols + 20)
     worksheet.update_cell(1, new_col_index, date_str)
     return new_col_index
-
 
 def find_or_create_profile_row(worksheet, username, profile_link):
     all_values = worksheet.get_all_values()
